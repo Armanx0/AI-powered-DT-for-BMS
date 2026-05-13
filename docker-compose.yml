@@ -1,0 +1,166 @@
+# ============================================
+# Battery Digital Twin MVP - Docker Compose
+# ============================================
+# Local development setup with FastAPI, PostgreSQL, and Redis
+
+version: '3.8'
+
+services:
+  # ============================================
+  # FastAPI Backend Service
+  # ============================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: battery-twin-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://battery_user:battery_password@postgres:5432/battery_twin
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - ENVIRONMENT=development
+      - DEBUG=True
+      - LOG_LEVEL=INFO
+      - USE_REDIS=True
+      - USE_CELERY=True
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    networks:
+      - battery-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================
+  # PostgreSQL Database (Neon simulation)
+  # ============================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: battery-twin-postgres
+    environment:
+      POSTGRES_USER: battery_user
+      POSTGRES_PASSWORD: battery_password
+      POSTGRES_DB: battery_twin
+      POSTGRES_INITDB_ARGS: "-c max_connections=100"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - battery-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U battery_user -d battery_twin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Redis Cache (Optional - for Celery)
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: battery-twin-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - battery-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # ============================================
+  # Celery Worker (Optional - for background tasks)
+  # ============================================
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: battery-twin-celery
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://battery_user:battery_password@postgres:5432/battery_twin
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - backend
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    networks:
+      - battery-network
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Beat (Optional - for scheduled tasks)
+  # ============================================
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: battery-twin-beat
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://battery_user:battery_password@postgres:5432/battery_twin
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - backend
+      - redis
+      - postgres
+    volumes:
+      - .:/app
+    networks:
+      - battery-network
+    restart: unless-stopped
+
+  # ============================================
+  # pgAdmin (Optional - Database GUI)
+  # ============================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: battery-twin-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@batterytwim.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - battery-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  battery-network:
+    driver: bridge
